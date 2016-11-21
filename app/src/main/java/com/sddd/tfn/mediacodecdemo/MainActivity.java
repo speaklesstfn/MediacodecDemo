@@ -118,7 +118,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean isEOS = false;
             long startMs = System.currentTimeMillis();
-
+            int inputChunk = 0;
             while (!Thread.interrupted()) {
                 if (!isEOS) {
                     int inIndex = decoder.dequeueInputBuffer(10000);
@@ -133,9 +133,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             decoder.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                             isEOS = true;
                         } else {
+//                            Log.d("HAHAHAHA", "submitted frame " + inputChunk);
                             decoder.queueInputBuffer(inIndex, 0, sampleSize, extractor.getSampleTime(), 0);
                             extractor.advance();
+                            inputChunk++;
                         }
+                    }else{
+                        Log.d("DecodeActivity","inIndex is -1");
                     }
                 }
 

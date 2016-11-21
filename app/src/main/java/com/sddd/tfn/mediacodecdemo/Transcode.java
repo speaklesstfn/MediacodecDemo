@@ -43,7 +43,6 @@ public class Transcode {
     private ByteBuffer[] vEncodeOutputBuffers;
     private MediaCodec.BufferInfo vEncodeBufferInfo;
 
-    private long vDecodeSize;
     private ArrayList<byte[]> chunkYUVDataContainer;//YUV数据块容器
 
 
@@ -51,6 +50,7 @@ public class Transcode {
 
     private MediaMuxer mediaMuxer;//混合器对象
     private ByteBuffer muxBuffer;
+    private boolean mMuxerStarted;
 
     public static Transcode getInstance() {
         return new Transcode();
@@ -101,9 +101,8 @@ public class Transcode {
         }
 
         chunkYUVDataContainer = new ArrayList<>();
-        initMediaDecode();//初始化解码器
-
-//        initMediaEncode();//初始化编码器
+        initMediaDecode();
+        initMediaEncode();
 
     }
 
@@ -119,10 +118,10 @@ public class Transcode {
                 String mime = format.getString(MediaFormat.KEY_MIME);
                 if (mime.startsWith("video/")) {//获取视频轨道
                     videoTrackIndex = i;
-                    mediaExtractor.selectTrack(videoTrackIndex);//选择此音频轨道
+                    mediaExtractor.selectTrack(videoTrackIndex);//选择此视频轨道
                     videoDecode = MediaCodec.createDecoderByType(mime);//创建视频解码器
                     videoDecode.configure(format, null, null, 0);
-                    continue;
+                    break;
                 }
             }
 
@@ -138,7 +137,7 @@ public class Transcode {
         vDecodeInputBuffers = videoDecode.getInputBuffers();//videoDecode在此ByteBuffer[]中获取输入数据
         vDecodeOutputBuffers = videoDecode.getOutputBuffers();//videoDecode将解码后的数据放到此ByteBuffer[]中 我们可以直接在这里面得到YUV数据
         vDecodeBufferInfo = new MediaCodec.BufferInfo();//用于描述解码得到的byte[]数据的相关信息
-        showLog("buffers:" + vDecodeInputBuffers.length);
+        showLog("buffers:" + vDecodeBufferInfo.size);
     }
 
     /**
@@ -148,7 +147,7 @@ public class Transcode {
     private void initMediaEncode() {
         try {
             MediaFormat vEncodeFormat = MediaFormat.createVideoFormat(vEncodeType, 272, 480);//参数对应-> mime type、宽、高
-            vEncodeFormat.setInteger(MediaFormat.KEY_BIT_RATE, 96000);//比特率
+            vEncodeFormat.setInteger(MediaFormat.KEY_BIT_RATE, 524288);//比特率
 
             vEncodeFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 15);
             vEncodeFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar);
@@ -157,8 +156,6 @@ public class Transcode {
 //            vEncodeFormat.setByteBuffer("csd-1", ByteBuffer.wrap(header_pps));
             videoEncode = MediaCodec.createEncoderByType(vEncodeType);
             videoEncode.configure(vEncodeFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            mediaMuxer = new MediaMuxer(dstPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            mediaMuxer.addTrack(vEncodeFormat);
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -168,21 +165,25 @@ public class Transcode {
             return;
         }
 
+        videoEncode.start();
+        vEncodeInputBuffers = videoEncode.getInputBuffers();
+        vEncodeOutputBuffers = videoEncode.getOutputBuffers();
+        vEncodeBufferInfo = new MediaCodec.BufferInfo();
+
+        try {
+            mediaMuxer = new MediaMuxer(dstPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
         if (mediaMuxer == null) {
             Log.e(TAG, "create mediaMuxer failed");
             return;
         }
 
-        videoEncode.start();
-        vEncodeInputBuffers = videoEncode.getInputBuffers();
-        vEncodeOutputBuffers = videoEncode.getOutputBuffers();
-        vEncodeBufferInfo = new MediaCodec.BufferInfo();
+        mMuxerStarted = false;
         showLog("init Media Encode complete");
-        mediaMuxer.start();
-        muxBuffer = ByteBuffer.allocate(500 * 1024);
     }
-
-    private boolean codecOver = false;
 
     /**
      * 开始转码
@@ -204,9 +205,7 @@ public class Transcode {
 
         @Override
         public void run() {
-            while (!codecOver) {
-                srcVideoFormatToYUV();
-            }
+            srcVideoFormatToYUV();
         }
     }
 
@@ -215,59 +214,169 @@ public class Transcode {
      *
      * @return 是否解码完所有数据
      */
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private void srcVideoFormatToYUV() {
-//        for (int i = 0; i < vDecodeInputBuffers.length - 1; i++) {
-            showLog("h666：");
-        int inputIndex = videoDecode.dequeueInputBuffer(-1);//获取可用的inputBuffer -1代表一直等待，0表示不等待 建议-1,避免丢帧
-//            showLog("srcVideoFormatToYUV," + i + " length:" + vDecodeInputBuffers.length + " inputIndex:" + inputIndex);
-        if (inputIndex < 0) {
-            codecOver = true;
+        int inputChunk = 0;
+        boolean outputDone = false;
+        boolean inputDone = false;
+        prepare();
+//        initMediaDecode();
+        // set for debug
+//        int cnt = 0;
+        while (!outputDone) {
+            int chunkSize = 0;
+//            ++cnt;
+            if (!inputDone) {
+//            for (int i = 0; i < vDecodeInputBuffers.length; i++) {
+                int inputBufIndex = videoDecode.dequeueInputBuffer(10000);//获取可用的inputBuffer -1代表一直等待，0表示不等待 建议-1,避免丢帧
+                if (inputBufIndex >= 0) {
+                    ByteBuffer inputBuf = vDecodeInputBuffers[inputBufIndex];
+                    // Read the sample data into the ByteBuffer.  This neither respects nor
+                    // updates inputBuf's position, limit, etc.
+                    chunkSize = mediaExtractor.readSampleData(inputBuf, 0);
+                    if (chunkSize < 0) {
+                        // End of stream -- send empty frame with EOS flag set.
+                        videoDecode.queueInputBuffer(inputBufIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                        inputDone = true;
+                        Log.d(TAG, "sent input EOS");
+                    } else {
+                        if (mediaExtractor.getSampleTrackIndex() != videoTrackIndex) {
+                            Log.w(TAG, "WEIRD: got sample from track " +
+                                    mediaExtractor.getSampleTrackIndex() + ", expected " + videoTrackIndex);
+                        }
+                        long presentationTimeUs = mediaExtractor.getSampleTime();
+                        videoDecode.queueInputBuffer(inputBufIndex, 0, chunkSize, presentationTimeUs, 0 /*flags*/);//通知MediaDecode解码刚刚传入的数据
+                        Log.d(TAG, "submitted frame " + inputChunk + " to dec, size=" + chunkSize);
+                        mediaExtractor.advance();//MediaExtractor移动到下一取样处
+                        inputChunk++;
+                    }
+                } else {
+                    //input data not available
+                    Log.d(TAG, "inputBufIndex is -1");
+                }
+            }
+
+            if (!outputDone) {
+                //获取解码得到的byte[]数据
+                int decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);
+                if (decoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
+                    // no output available yet
+                    Log.d(TAG, "no output from decoder available");
+                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
+                    // not important for us, since we're using Surface
+                    vDecodeOutputBuffers = videoDecode.getOutputBuffers();
+                    Log.d(TAG, "decoder output buffers changed");
+                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
+                    MediaFormat newFormat = videoDecode.getOutputFormat();
+                    Log.d(TAG, "decoder output format changed: " + newFormat);
+                } else if (decoderStatus < 0) {
+                    Log.d(TAG, "unexpected result from decoder.dequeueOutputBuffer: " + decoderStatus);
+                } else { // decoderStatus >= 0
+                    Log.d(TAG, "decoder given buffer " + decoderStatus + " (size=" + vDecodeBufferInfo.size + ")");
+                    if ((vDecodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        Log.d(TAG, "output EOS");
+                        outputDone = true;
+                    }
+//                    videoDecode.releaseOutputBuffer(decoderStatus, false);
+                    // As soon as we call releaseOutputBuffer, the buffer will be forwarded
+                    // to SurfaceTexture to convert to a texture.  The API doesn't guarantee
+                    // that the texture will be available before the call returns, so we
+                    // need to wait for the onFrameAvailable callback to fire.
+                    ByteBuffer outputBuffer;
+                    byte[] chunkYUV;
+                    if (chunkSize > 0) {
+                        while (decoderStatus >= 0) {//每次解码完成的数据不一定能一次吐出 所以用while循环，保证解码器吐出所有数据
+                            outputBuffer = vDecodeOutputBuffers[decoderStatus];//拿到用于存放YUV数据的Buffer
+                            chunkYUV = new byte[vDecodeBufferInfo.size];//BufferInfo内定义了此数据块的大小
+                            outputBuffer.get(chunkYUV);//将Buffer内的数据取出到字节数组中
+                            outputBuffer.clear();//数据取出后一定记得清空此Buffer MediaCodec是循环使用这些Buffer的，不清空下次会得到同样的数据
+//                        putYUVData(chunkYUV);//自己定义的方法，供编码器所在的线程获取数据,下面会贴出代码
+
+                            encodeYUV(chunkYUV);
+
+                            videoDecode.releaseOutputBuffer(decoderStatus, false);//此操作一定要做，不然MediaCodec用完所有的Buffer后 将不能向外输出数据
+                            decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);//再次获取数据，如果没有数据输出则outputIndex=-1 循环结束
+                            System.gc();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR2)
+    private void encodeYUV(byte[] chunkYUV) {
+        int inputIndex;
+        int encoderStatus;
+        showLog("doEncode");
+        if (chunkYUV == null || chunkYUV.length == 0) {
             return;
         }
 
-        ByteBuffer inputBuffer = vDecodeInputBuffers[inputIndex];//拿到inputBuffer
-//            showLog("inputBuffer:" + i + "  ::::" + inputBuffer.toString());
-        inputBuffer.clear();//清空之前传入inputBuffer内的数据
-        int sampleSize = mediaExtractor.readSampleData(inputBuffer, 0);//MediaExtractor读取数据到inputBuffer中
-//            showLog("sampleSize:" + sampleSize + "   i:" + i);
-        if (sampleSize < 0) {//小于0 代表所有数据已读取完成
-            videoDecode.queueInputBuffer(inputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-            codecOver = true;
+        inputIndex = videoEncode.dequeueInputBuffer(10000);
+        ByteBuffer inputBuffer = vEncodeInputBuffers[inputIndex];
+        inputBuffer.clear();//同解码器
+        inputBuffer.limit(chunkYUV.length);
+        inputBuffer.put(chunkYUV);//YUV数据填充给inputBuffer
+        videoEncode.queueInputBuffer(inputIndex, 0, chunkYUV.length, 0, 0);//通知编码器 编码
+
+        encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);//同解码器
+        if (encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
+            // no output available yet
+            Log.d(TAG, "no output from encoder available");
+        } else if (encoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
+            vEncodeOutputBuffers = videoEncode.getOutputBuffers();
+            Log.d(TAG, "encoder output buffers changed");
+        } else if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
+            if (!mMuxerStarted) {
+                MediaFormat newFormat = videoEncode.getOutputFormat();
+                Log.d(TAG, "encoder output format changed: " + newFormat);
+
+                // now that we have the Magic Goodies, start the muxer
+                videoTrackIndex = mediaMuxer.addTrack(newFormat);
+                mediaMuxer.start();
+                mMuxerStarted = true;
+            }
+        } else if (encoderStatus < 0) {
+            Log.w(TAG, "unexpected result from encoder.dequeueOutputBuffer: " +
+                    encoderStatus);
+            // let's ignore it
         } else {
-//                showLog("h1：" + i);
-            videoDecode.queueInputBuffer(inputIndex, 0, sampleSize, mediaExtractor.getSampleTime(), 0);//通知MediaDecode解码刚刚传入的数据
+            while (encoderStatus >= 0) {
+                ByteBuffer encodedData = vEncodeOutputBuffers[encoderStatus];
+                if (encodedData == null) {
+                    throw new RuntimeException("encoderOutputBuffer " + encoderStatus +
+                            " was null");
+                }
 
-//                showLog("h3：" + i);
-            mediaExtractor.advance();//MediaExtractor移动到下一取样处
+                if ((vEncodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                    // The codec config data was pulled out and fed to the muxer when we got
+                    // the INFO_OUTPUT_FORMAT_CHANGED status.  Ignore it.
+                    Log.d(TAG, "ignoring BUFFER_FLAG_CODEC_CONFIG");
+                    vEncodeBufferInfo.size = 0;
+                }
 
-//                showLog("h4：" + i);
-            vDecodeSize += sampleSize;
-//                showLog("h5：" + i);
+                if (vEncodeBufferInfo.size != 0) {
+                    if (!mMuxerStarted) {
+                        throw new RuntimeException("muxer hasn't started");
+                    }
+
+                    // adjust the ByteBuffer values to match BufferInfo (not needed?)
+                    encodedData.position(vEncodeBufferInfo.offset);
+                    encodedData.limit(vEncodeBufferInfo.offset + vEncodeBufferInfo.size);
+
+                    mediaMuxer.writeSampleData(videoTrackIndex, encodedData, vEncodeBufferInfo);
+                    Log.d(TAG, "sent " + vEncodeBufferInfo.size + " bytes to muxer");
+                }
+
+                videoEncode.releaseOutputBuffer(encoderStatus, false);
+
+                if ((vEncodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    Log.d(TAG, "end of stream reached");
+                }
+                encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);
+            }
         }
-//            showLog("h6：" + i);
-//        }
-
-        //获取解码得到的byte[]数据 参数BufferInfo上面已介绍 10000同样为等待时间 同上-1代表一直等待，0代表不等待。此处单位为微秒
-        //此处建议不要填-1 有些时候并没有数据输出，那么他就会一直卡在这等待
-        int outputIndex = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);
-
-        showLog("decodeOutIndex:" + outputIndex);
-        ByteBuffer outputBuffer;
-        byte[] chunkYUV;
-        if (outputIndex >= 0 && outputIndex < vDecodeOutputBuffers.length) {//每次解码完成的数据不一定能一次吐出 所以用while循环，保证解码器吐出所有数据
-            outputBuffer = vDecodeOutputBuffers[outputIndex];//拿到用于存放YUV数据的Buffer
-            showLog("outputBuffer:" + outputBuffer.toString());
-//            if (null == outputBuffer) {
-//                break;
-//            }
-            chunkYUV = new byte[vDecodeBufferInfo.size];//BufferInfo内定义了此数据块的大小
-//            outputBuffer.get(chunkYUV);//将Buffer内的数据取出到字节数组中
-//            outputBuffer.clear();//数据取出后一定记得清空此Buffer MediaCodec是循环使用这些Buffer的，不清空下次会得到同样的数据
-            putYUVData(chunkYUV);//自己定义的方法，供编码器所在的线程获取数据,下面会贴出代码
-            videoDecode.releaseOutputBuffer(outputIndex, false);//此操作一定要做，不然MediaCodec用完所有的Buffer后 将不能向外输出数据
-//            outputIndex = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);//再次获取数据，如果没有数据输出则outputIndex=-1 循环结束
-        }
-
     }
 
     /**
@@ -288,14 +397,7 @@ public class Transcode {
 
         @Override
         public void run() {
-            long t = System.currentTimeMillis();
-            while (!codecOver || !chunkYUVDataContainer.isEmpty()) {
-                dstVideoFormatFromYUV();
-            }
-            if (onCompleteListener != null) {
-                onCompleteListener.completed();
-            }
-            showLog("vDecodeSize:" + vDecodeSize + "time:" + (System.currentTimeMillis() - t));
+            dstVideoFormatFromYUV();
         }
     }
 
@@ -306,30 +408,81 @@ public class Transcode {
     private void dstVideoFormatFromYUV() {
         byte[] chunkYUV;
         int inputIndex;
-        int outputIndex;
-
-//        showLog("doEncode");
-        for (int i = 0; i < vEncodeInputBuffers.length - 1; i++) {
+        int encoderStatus;
+        initMediaEncode();
+        showLog("doEncode");
+        while (true) {
             chunkYUV = getYUVData();//获取解码器所在线程输出的数据 代码后边会贴上
             if (chunkYUV == null) {
                 break;
             }
-            inputIndex = videoEncode.dequeueInputBuffer(-1);//同解码器
-            ByteBuffer inputBuffer = vEncodeInputBuffers[inputIndex];//同解码器
+
+            inputIndex = videoEncode.dequeueInputBuffer(10000);
+            ByteBuffer inputBuffer = vEncodeInputBuffers[inputIndex];
             inputBuffer.clear();//同解码器
             inputBuffer.limit(chunkYUV.length);
             inputBuffer.put(chunkYUV);//YUV数据填充给inputBuffer
             videoEncode.queueInputBuffer(inputIndex, 0, chunkYUV.length, 0, 0);//通知编码器 编码
-        }
 
-        outputIndex = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);//同解码器
-//        boolean isFinish = false;
-        ByteBuffer outBuffer;
-        while (outputIndex >= 0) {//同解码器
-            outBuffer = vEncodeOutputBuffers[outputIndex];
-            mediaMuxer.writeSampleData(videoTrackIndex, outBuffer, vEncodeBufferInfo);
-            videoEncode.releaseOutputBuffer(outputIndex, false);
-            outputIndex = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);
+            encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);//同解码器
+            if (encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
+                // no output available yet
+                Log.d(TAG, "no output from encoder available");
+            } else if (encoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
+                vEncodeOutputBuffers = videoEncode.getOutputBuffers();
+                Log.d(TAG, "encoder output buffers changed");
+            } else if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
+                if (!mMuxerStarted) {
+                    MediaFormat newFormat = videoEncode.getOutputFormat();
+                    Log.d(TAG, "encoder output format changed: " + newFormat);
+
+                    // now that we have the Magic Goodies, start the muxer
+                    videoTrackIndex = mediaMuxer.addTrack(newFormat);
+                    mediaMuxer.start();
+                    mMuxerStarted = true;
+                }
+            } else if (encoderStatus < 0) {
+                Log.w(TAG, "unexpected result from encoder.dequeueOutputBuffer: " +
+                        encoderStatus);
+                // let's ignore it
+            } else {
+                while (encoderStatus >= 0) {
+                    ByteBuffer encodedData = vEncodeOutputBuffers[encoderStatus];
+                    if (encodedData == null) {
+                        throw new RuntimeException("encoderOutputBuffer " + encoderStatus +
+                                " was null");
+                    }
+
+                    if ((vEncodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        // The codec config data was pulled out and fed to the muxer when we got
+                        // the INFO_OUTPUT_FORMAT_CHANGED status.  Ignore it.
+                        Log.d(TAG, "ignoring BUFFER_FLAG_CODEC_CONFIG");
+                        vEncodeBufferInfo.size = 0;
+                    }
+
+                    if (vEncodeBufferInfo.size != 0) {
+                        if (!mMuxerStarted) {
+                            throw new RuntimeException("muxer hasn't started");
+                        }
+
+                        // adjust the ByteBuffer values to match BufferInfo (not needed?)
+                        encodedData.position(vEncodeBufferInfo.offset);
+                        encodedData.limit(vEncodeBufferInfo.offset + vEncodeBufferInfo.size);
+
+                        mediaMuxer.writeSampleData(videoTrackIndex, encodedData, vEncodeBufferInfo);
+                        Log.d(TAG, "sent " + vEncodeBufferInfo.size + " bytes to muxer");
+                    }
+
+                    videoEncode.releaseOutputBuffer(encoderStatus, false);
+
+                    if ((vEncodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+
+                        Log.d(TAG, "end of stream reached");
+                        break;      // out of while
+                    }
+                    encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);
+                }
+            }
         }
     }
 
