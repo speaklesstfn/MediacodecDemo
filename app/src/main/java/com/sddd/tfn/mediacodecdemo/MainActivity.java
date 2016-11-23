@@ -74,7 +74,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         if (mPlayer != null) {
-            mPlayer.interrupt();
+            try {
+                mPlayer.interrupt();
+            } catch (Exception e) {
+                e.printStackTrace();
+            } finally {
+                mPlayer = null;
+            }
         }
     }
 
@@ -116,10 +122,11 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             ByteBuffer[] inputBuffers = decoder.getInputBuffers();
             ByteBuffer[] outputBuffers = decoder.getOutputBuffers();
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            boolean isOutEnd = false;
             boolean isEOS = false;
             long startMs = System.currentTimeMillis();
             int inputChunk = 0;
-            while (!Thread.interrupted()) {
+            while (!isOutEnd) {
                 if (!isEOS) {
                     int inIndex = decoder.dequeueInputBuffer(10000);
                     if (inIndex >= 0) {
@@ -138,8 +145,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             extractor.advance();
                             inputChunk++;
                         }
-                    }else{
-                        Log.d("DecodeActivity","inIndex is -1");
+                    } else {
+                        Log.d("DecodeActivity", "inIndex is -1");
                     }
                 }
 
@@ -156,7 +163,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         Log.d("DecodeActivity", "dequeueOutputBuffer timed out!");
                         break;
                     default:
+                        Log.e("AFFFFFFFFF", "decoded buffer info ,size :" + info.size);
                         ByteBuffer buffer = outputBuffers[outIndex];
+//                        Log.e("AFFFFFFFFF","decoded buffer info ,size :" + info.size);
                         Log.v("DecodeActivity", "We can't use this buffer but render it due to the API limit, " + buffer);
 
                         // We use a very simple clock to keep the video FPS, or the video
@@ -176,6 +185,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // All decoded frames have been rendered, we can stop playing now
                 if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                     Log.d("DecodeActivity", "OutputBuffer BUFFER_FLAG_END_OF_STREAM");
+                    isOutEnd = true;
                     break;
                 }
             }

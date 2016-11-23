@@ -366,7 +366,7 @@ public class VideoDecode {
  * VideoDecode videodecoder=new VideoDecode();
  * try{
  * videodecoder.setSaveFrames(outputdir,2);   //这里用于设置输出YUV的位置和YUV的格式
- * videodecoder.VideoDecodePrepare(videodir);  //这里要输入待解码视频文件的地址
+ * videodecoder.VideoDecodePrepare(videosdir);  //这里要输入待解码视频文件的地址
  * videodecoder.excuate();
  * <p>
  * }catch(IOException el){

@@ -216,34 +216,26 @@ public class Transcode {
      */
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private void srcVideoFormatToYUV() {
+        prepare();
         int inputChunk = 0;
         boolean outputDone = false;
         boolean inputDone = false;
-        prepare();
-//        initMediaDecode();
-        // set for debug
-//        int cnt = 0;
         while (!outputDone) {
             int chunkSize = 0;
-//            ++cnt;
             if (!inputDone) {
-//            for (int i = 0; i < vDecodeInputBuffers.length; i++) {
                 int inputBufIndex = videoDecode.dequeueInputBuffer(10000);//获取可用的inputBuffer -1代表一直等待，0表示不等待 建议-1,避免丢帧
                 if (inputBufIndex >= 0) {
                     ByteBuffer inputBuf = vDecodeInputBuffers[inputBufIndex];
-                    // Read the sample data into the ByteBuffer.  This neither respects nor
-                    // updates inputBuf's position, limit, etc.
                     chunkSize = mediaExtractor.readSampleData(inputBuf, 0);
                     if (chunkSize < 0) {
-                        // End of stream -- send empty frame with EOS flag set.
                         videoDecode.queueInputBuffer(inputBufIndex, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                         inputDone = true;
                         Log.d(TAG, "sent input EOS");
                     } else {
-                        if (mediaExtractor.getSampleTrackIndex() != videoTrackIndex) {
-                            Log.w(TAG, "WEIRD: got sample from track " +
-                                    mediaExtractor.getSampleTrackIndex() + ", expected " + videoTrackIndex);
-                        }
+//                        if (mediaExtractor.getSampleTrackIndex() != videoTrackIndex) {
+//                            Log.w(TAG, "WEIRD: got sample from track " +
+//                                    mediaExtractor.getSampleTrackIndex() + ", expected " + videoTrackIndex);
+//                        }
                         long presentationTimeUs = mediaExtractor.getSampleTime();
                         videoDecode.queueInputBuffer(inputBufIndex, 0, chunkSize, presentationTimeUs, 0 /*flags*/);//通知MediaDecode解码刚刚传入的数据
                         Log.d(TAG, "submitted frame " + inputChunk + " to dec, size=" + chunkSize);
@@ -256,51 +248,50 @@ public class Transcode {
                 }
             }
 
-            if (!outputDone) {
-                //获取解码得到的byte[]数据
-                int decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);
-                if (decoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
-                    // no output available yet
-                    Log.d(TAG, "no output from decoder available");
-                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
-                    // not important for us, since we're using Surface
-                    vDecodeOutputBuffers = videoDecode.getOutputBuffers();
-                    Log.d(TAG, "decoder output buffers changed");
-                } else if (decoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
-                    MediaFormat newFormat = videoDecode.getOutputFormat();
-                    Log.d(TAG, "decoder output format changed: " + newFormat);
-                } else if (decoderStatus < 0) {
-                    Log.d(TAG, "unexpected result from decoder.dequeueOutputBuffer: " + decoderStatus);
-                } else { // decoderStatus >= 0
-                    Log.d(TAG, "decoder given buffer " + decoderStatus + " (size=" + vDecodeBufferInfo.size + ")");
-                    if ((vDecodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        Log.d(TAG, "output EOS");
-                        outputDone = true;
-                    }
-//                    videoDecode.releaseOutputBuffer(decoderStatus, false);
-                    // As soon as we call releaseOutputBuffer, the buffer will be forwarded
-                    // to SurfaceTexture to convert to a texture.  The API doesn't guarantee
-                    // that the texture will be available before the call returns, so we
-                    // need to wait for the onFrameAvailable callback to fire.
-                    ByteBuffer outputBuffer;
-                    byte[] chunkYUV;
-                    if (chunkSize > 0) {
-                        while (decoderStatus >= 0) {//每次解码完成的数据不一定能一次吐出 所以用while循环，保证解码器吐出所有数据
-                            outputBuffer = vDecodeOutputBuffers[decoderStatus];//拿到用于存放YUV数据的Buffer
-                            chunkYUV = new byte[vDecodeBufferInfo.size];//BufferInfo内定义了此数据块的大小
-                            outputBuffer.get(chunkYUV);//将Buffer内的数据取出到字节数组中
-                            outputBuffer.clear();//数据取出后一定记得清空此Buffer MediaCodec是循环使用这些Buffer的，不清空下次会得到同样的数据
-//                        putYUVData(chunkYUV);//自己定义的方法，供编码器所在的线程获取数据,下面会贴出代码
+//            if (!outputDone) {
+            //获取解码得到的byte[]数据
+            int decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);
+            if (decoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
+                // no output available yet
+                Log.d(TAG, "no output from decoder available");
+            } else if (decoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
+                // not important for us, since we're using Surface
+                vDecodeOutputBuffers = videoDecode.getOutputBuffers();
+                Log.d(TAG, "decoder output buffers changed");
+            } else if (decoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
+//                    MediaFormat newFormat = videoDecode.getOutputFormat();
+//                    Log.d(TAG, "decoder output format changed: " + newFormat);
+            } else if (decoderStatus < 0) {
+                Log.d(TAG, "unexpected result from decoder.dequeueOutputBuffer: " + decoderStatus);
+            } else { // decoderStatus >= 0
+                Log.d("AFFFFFFFFF", "decoder given buffer " + decoderStatus + " (size=" + vDecodeBufferInfo.size + ")");
+                Log.d("AFFFFFFFFF", "decode buffer :" + vDecodeOutputBuffers);
+//                    if ((vDecodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+//                        Log.d(TAG, "output EOS");
+//                        outputDone = true;
+//                    }
 
-                            encodeYUV(chunkYUV);
+                videoDecode.releaseOutputBuffer(decoderStatus, false);//此操作一定要做，不然MediaCodec用完所有的Buffer后 将不能向外输出数据
 
-                            videoDecode.releaseOutputBuffer(decoderStatus, false);//此操作一定要做，不然MediaCodec用完所有的Buffer后 将不能向外输出数据
-                            decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);//再次获取数据，如果没有数据输出则outputIndex=-1 循环结束
-                            System.gc();
-                        }
-                    }
-                }
+//                ByteBuffer outputBuffer;
+//                byte[] chunkYUV;
+//                if (chunkSize > 0) {
+//                    while (decoderStatus >= 0) {//每次解码完成的数据不一定能一次吐出 所以用while循环，保证解码器吐出所有数据
+//                        outputBuffer = vDecodeOutputBuffers[decoderStatus];//拿到用于存放YUV数据的Buffer
+//                        chunkYUV = new byte[vDecodeBufferInfo.size];//BufferInfo内定义了此数据块的大小
+//                        outputBuffer.get(chunkYUV);//将Buffer内的数据取出到字节数组中
+//                        outputBuffer.clear();//数据取出后一定记得清空此Buffer MediaCodec是循环使用这些Buffer的，不清空下次会得到同样的数据
+////                        putYUVData(chunkYUV);//自己定义的方法，供编码器所在的线程获取数据,下面会贴出代码
+//
+//                        encodeYUV(chunkYUV);
+//
+//                        videoDecode.releaseOutputBuffer(decoderStatus, false);//此操作一定要做，不然MediaCodec用完所有的Buffer后 将不能向外输出数据
+//                        decoderStatus = videoDecode.dequeueOutputBuffer(vDecodeBufferInfo, 10000);//再次获取数据，如果没有数据输出则outputIndex=-1 循环结束
+//                        System.gc();
+//                    }
+//                }
             }
+//            }
         }
     }
 
