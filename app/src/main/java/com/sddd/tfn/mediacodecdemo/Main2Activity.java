@@ -4,20 +4,18 @@ import android.Manifest;
 import android.annotation.TargetApi;
 import android.graphics.SurfaceTexture;
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.media.MediaMuxer;
 import android.os.Build;
 import android.os.Environment;
 import android.support.v4.app.ActivityCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
 import android.widget.Button;
-import android.widget.Toast;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -25,8 +23,19 @@ import java.nio.ByteBuffer;
 public class Main2Activity extends AppCompatActivity implements View.OnClickListener {
     private static final String TAG = "Main2Activity";
     private Button mTransBtn = null;
-    private static final String SAMPLE = Environment.getExternalStorageDirectory() + "/video_20161117_123330.mp4";
+    private static final String SAMPLE = Environment.getExternalStorageDirectory() + "/video_20161117_120321.mp4";
+    private static final String DSTFILE = Environment.getExternalStorageDirectory() + "hw_out.mp4";
     private TranscodeThread mTranscode = null;
+
+    private MediaFormat mOutputFormat = null;
+    private String vEncodeType = "video/avc";//视频编码器
+    private MediaCodec videoEncoder;//视频编码对象
+    private ByteBuffer[] vEncodeInputBuffers;
+    private ByteBuffer[] vEncodeOutputBuffers;
+    private MediaCodec.BufferInfo vEncodeBufferInfo;
+    private MediaMuxer mediaMuxer;//混合器对象
+    private boolean mMuxerStarted;
+    private int videoTrackIndex = -1;//视频的Track号
 
 
     @Override
@@ -74,7 +83,7 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
                 for (int i = 0; i < extractor.getTrackCount(); i++) {
                     MediaFormat format = extractor.getTrackFormat(i);
                     String mime = format.getString(MediaFormat.KEY_MIME);
-                    if (mime.startsWith("video/")) {
+                    if (mime.startsWith("audio/")) {
                         extractor.selectTrack(i);
                         decoder = MediaCodec.createDecoderByType(mime);
                         decoder.configure(format, null, null, 0);
@@ -94,6 +103,8 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
             ByteBuffer[] inputBuffers = decoder.getInputBuffers();
             ByteBuffer[] outputBuffers = decoder.getOutputBuffers();
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            mOutputFormat = decoder.getOutputFormat();
+            initMediaEncode();
 
             boolean isOutEnd = false;
             boolean isEOS = false;
@@ -130,6 +141,7 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
                         outputBuffers = decoder.getOutputBuffers();
                         break;
                     case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
+                        mOutputFormat = decoder.getOutputFormat();
                         Log.d(TAG, "New format " + decoder.getOutputFormat());
                         break;
                     case MediaCodec.INFO_TRY_AGAIN_LATER:
@@ -157,6 +169,7 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
                         buffer.clear();
                         if (chunkYUV.length > 0) {
                             Log.e("AFFFFFFFFF", "decoded chunk :" + chunkYUV.length);
+                            encodeYUV(chunkYUV);
                         }
                         decoder.releaseOutputBuffer(outIndex, false);
                         chunkYUV = null;
@@ -178,32 +191,78 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
         }
     }
 
+    /**
+     * 初始化编码器
+     */
     @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR2)
+    private void initMediaEncode() {
+        try {
+            MediaFormat vEncodeFormat = MediaFormat.createVideoFormat(vEncodeType, 272, 480);//参数对应-> mime type、宽、高
+            vEncodeFormat.setInteger(MediaFormat.KEY_BIT_RATE, 524288);//比特率
+
+            vEncodeFormat.setInteger(MediaFormat.KEY_FRAME_RATE, 24);
+            vEncodeFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar);
+            vEncodeFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5);
+//            vEncodeFormat.setByteBuffer("csd-0", ByteBuffer.wrap(header_sps));
+//            vEncodeFormat.setByteBuffer("csd-1", ByteBuffer.wrap(header_pps));
+            videoEncoder = MediaCodec.createEncoderByType(vEncodeType);
+            videoEncoder.configure(vEncodeFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        if (videoEncoder == null) {
+            Log.e(TAG, "create videoEncode failed");
+            return;
+        }
+
+        videoEncoder.start();
+        vEncodeInputBuffers = videoEncoder.getInputBuffers();
+        vEncodeOutputBuffers = videoEncoder.getOutputBuffers();
+        vEncodeBufferInfo = new MediaCodec.BufferInfo();
+
+        try {
+            mediaMuxer = new MediaMuxer(DSTFILE, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        if (mediaMuxer == null) {
+            Log.e(TAG, "create mediaMuxer failed");
+            return;
+        }
+
+        mMuxerStarted = false;
+        Log.d(TAG, "init Media Encode complete");
+    }
+
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private void encodeYUV(byte[] chunkYUV) {
         int inputIndex;
         int encoderStatus;
-        showLog("doEncode");
+        Log.d(TAG, "doEncode");
         if (chunkYUV == null || chunkYUV.length == 0) {
             return;
         }
 
-        inputIndex = videoEncode.dequeueInputBuffer(10000);
-        ByteBuffer inputBuffer = vEncodeInputBuffers[inputIndex];
+        inputIndex = videoEncoder.dequeueInputBuffer(10000);
+        ByteBuffer inputBuffer = videoEncoder.getInputBuffer(inputIndex);
         inputBuffer.clear();//同解码器
+        Log.d("AFFFFFFFF","inputBuffer capacity:" + inputBuffer.capacity());
         inputBuffer.limit(chunkYUV.length);
         inputBuffer.put(chunkYUV);//YUV数据填充给inputBuffer
-        videoEncode.queueInputBuffer(inputIndex, 0, chunkYUV.length, 0, 0);//通知编码器 编码
+        videoEncoder.queueInputBuffer(inputIndex, 0, chunkYUV.length, 0, 0);//通知编码器 编码
 
-        encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);//同解码器
+        encoderStatus = videoEncoder.dequeueOutputBuffer(vEncodeBufferInfo, 10000);//同解码器
         if (encoderStatus == MediaCodec.INFO_TRY_AGAIN_LATER) {//-1
             // no output available yet
             Log.d(TAG, "no output from encoder available");
         } else if (encoderStatus == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {//-3
-            vEncodeOutputBuffers = videoEncode.getOutputBuffers();
+            vEncodeOutputBuffers = videoEncoder.getOutputBuffers();
             Log.d(TAG, "encoder output buffers changed");
         } else if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {//-2
             if (!mMuxerStarted) {
-                MediaFormat newFormat = videoEncode.getOutputFormat();
+                MediaFormat newFormat = videoEncoder.getOutputFormat();
                 Log.d(TAG, "encoder output format changed: " + newFormat);
 
                 // now that we have the Magic Goodies, start the muxer
@@ -217,7 +276,7 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
             // let's ignore it
         } else {
             while (encoderStatus >= 0) {
-                ByteBuffer encodedData = vEncodeOutputBuffers[encoderStatus];
+                ByteBuffer encodedData = videoEncoder.getOutputBuffer(encoderStatus);
                 if (encodedData == null) {
                     throw new RuntimeException("encoderOutputBuffer " + encoderStatus +
                             " was null");
@@ -243,12 +302,12 @@ public class Main2Activity extends AppCompatActivity implements View.OnClickList
                     Log.d(TAG, "sent " + vEncodeBufferInfo.size + " bytes to muxer");
                 }
 
-                videoEncode.releaseOutputBuffer(encoderStatus, false);
+                videoEncoder.releaseOutputBuffer(encoderStatus, false);
 
                 if ((vEncodeBufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                     Log.d(TAG, "end of stream reached");
                 }
-                encoderStatus = videoEncode.dequeueOutputBuffer(vEncodeBufferInfo, 10000);
+                encoderStatus = videoEncoder.dequeueOutputBuffer(vEncodeBufferInfo, 10000);
             }
         }
     }
